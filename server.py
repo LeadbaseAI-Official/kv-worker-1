@@ -7,6 +7,7 @@ import threading
 import subprocess
 import re
 import requests
+import uvicorn
 from typing import Optional, Dict, Any
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
