@@ -233,11 +233,43 @@ def upload_to_redis(client_id: str, state_data: bytes) -> bool:
                 redis_url = url
                 break
         
-        if not redis_url:
-            print("[Redis Link] Error: No active redis-worker URL registered in DNS registry.", flush=True)
-            return False
+        import gzip
+        compressed_data = gzip.compress(state_data)
+        print(f"[Redis Link] Compressed state from {len(state_data)} to {len(compressed_data)} bytes.", flush=True)
 
-        b64_str = base64.b64encode(state_data).decode("utf-8")
+        if not redis_url:
+            print("[Redis Link] No active redis-worker URL registered. Falling back to direct broadcast to active runners...", flush=True)
+            # Find all active model runners (keys starting with 0bm or 2bm)
+            targets = []
+            for category, sub_dict in config_data.items():
+                if category in ("standby-server", "redis-worker", "kv-worker", "standby", "redis"):
+                    continue
+                if isinstance(sub_dict, dict):
+                    for runner_name, url in sub_dict.items():
+                        if url and url.startswith("https://"):
+                            targets.append((runner_name, url))
+            
+            b64_str = base64.b64encode(compressed_data).decode("utf-8")
+            payload = {
+                "client_id": client_id,
+                "state_bytes_base64": b64_str
+            }
+            
+            success_count = 0
+            for name, url in targets:
+                try:
+                    res = requests.post(f"{url.rstrip('/')}/v1/global-update", json=payload, timeout=15)
+                    if res.status_code == 200:
+                        print(f"[Direct Sync] Successfully synced client cache to runner: {name}", flush=True)
+                        success_count += 1
+                    else:
+                        print(f"[Direct Sync] Runner {name} returned status {res.status_code}", flush=True)
+                except Exception as ex:
+                    print(f"[Direct Sync] Error syncing directly to runner {name}: {ex}", flush=True)
+            
+            return success_count > 0
+
+        b64_str = base64.b64encode(compressed_data).decode("utf-8")
         payload = {
             "key": f"global:{client_id}",
             "value": b64_str
