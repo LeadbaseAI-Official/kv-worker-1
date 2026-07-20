@@ -1,0 +1,85 @@
+name: Run KV Cache Compiler Worker
+
+on:
+  workflow_dispatch:
+
+jobs:
+  prepare-assets:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Cache GGUF Model
+        id: cache-model
+        uses: actions/cache@v4
+        with:
+          path: Qwen3.5-0.8B-Q4_K_M.gguf
+          key: Qwen3.5-0.8B-Q4_K_M-model-${{ runner.os }}-v2
+
+      - name: Download GGUF Model if not cached
+        if: steps.cache-model.outputs.cache-hit != 'true'
+        run: |
+          echo "Model cache miss. Downloading GGUF model from Hugging Face..."
+          wget -q --show-progress https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf -O Qwen3.5-0.8B-Q4_K_M.gguf
+
+      - name: Cache Python Virtual Environment
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-no-avx-v3
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python Dependencies
+        if: steps.cache-venv.outputs.cache-hit != 'true'
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_AVX512=OFF -DGGML_FMA=OFF" .venv/bin/pip install llama-cpp-python --no-cache-dir --force-reinstall --no-binary llama-cpp-python
+          .venv/bin/pip install -r requirements.txt
+
+  run-server:
+    needs: prepare-assets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Restore GGUF Model Cache
+        uses: actions/cache@v4
+        with:
+          path: Qwen3.5-0.8B-Q4_K_M.gguf
+          key: Qwen3.5-0.8B-Q4_K_M-model-${{ runner.os }}-v2
+
+      - name: Cache Python Virtual Environment
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-no-avx-v3
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download cloudflared
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared
+          chmod +x cloudflared
+
+      - name: Start KV Compiler Server
+        env:
+          GITHUB_PAT: ${{ secrets.GH_PAT }}
+          GITHUB_ORG: ${{ secrets.GH_ORG }}
+        run: |
+          .venv/bin/python -u server.py
