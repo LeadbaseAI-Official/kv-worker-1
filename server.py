@@ -95,15 +95,14 @@ def start_cloudflare_tunnel() -> Optional[str]:
         print(f"Failed to start cloudflared tunnel process: {ex}", flush=True)
         return None
 
+SUPERKEY = "kv-worker"
+
 # ---------------------------------------------------------------------------
 # GitHub DNS Updater (Via Cloudflare Worker)
 # ---------------------------------------------------------------------------
 def update_github_dns(pat: str, org: str, public_url: str, repo_name: str) -> None:
     max_attempts: int = 5
-    match = re.match(r"^(.*?)-(\d+)$", repo_name)
-    superkey = match.group(1) if match else "kv"
-    
-    dns_key = f"{superkey}/{repo_name}"
+    dns_key = f"{SUPERKEY}/{repo_name}"
     print(f"Updating DNS registry via Cloudflare Worker... Key: {dns_key}", flush=True)
     
     for attempt in range(1, max_attempts + 1):
@@ -226,10 +225,15 @@ def upload_to_redis(client_id: str, state_data: bytes) -> bool:
             return False
             
         config_data = res_dns.json()
-        redis_url: Optional[str] = config_data.get("redis", {}).get("redis-worker")
+        redis_pool = config_data.get("redis-worker", {})
+        redis_url: Optional[str] = None
+        for key_name, url in redis_pool.items():
+            if url and url.startswith("https://"):
+                redis_url = url
+                break
         
         if not redis_url:
-            print("[Redis Link] Error: redis-worker URL not registered in DNS registry.", flush=True)
+            print("[Redis Link] Error: No active redis-worker URL registered in DNS registry.", flush=True)
             return False
 
         b64_str = base64.b64encode(state_data).decode("utf-8")
