@@ -315,7 +315,8 @@ def update_global_cache(req: UpdateRequest) -> Dict[str, Any]:
             req.kb.strip(),
             ""
         ]
-        stitched_text = "\n".join(prompt_parts)
+        system_content = "\n".join(prompt_parts)
+        stitched_text = f"<|im_start|>system\n{system_content}<|im_end|>\n"
         
         tokens = llm.tokenize(stitched_text.encode("utf-8"))
         log_message("system", f"Tokenizing prompt for client {req.client_id} (Token count: {len(tokens)})")
