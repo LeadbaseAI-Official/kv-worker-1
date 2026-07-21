@@ -8,6 +8,8 @@ import subprocess
 import re
 import requests
 import uvicorn
+import datetime
+import gzip
 from typing import Optional, Dict, Any
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
@@ -21,6 +23,13 @@ class UpdateRequest(BaseModel):
     system_prompt: str
     persona: str
     kb: str
+
+# Standardized logging helper: [HH:MM:SS | DD] [tag] : msg
+def log_message(tag: str, msg: str) -> None:
+    now = datetime.datetime.now()
+    now_str = now.strftime("%H:%M:%S")
+    day_str = now.strftime("%d")
+    print(f"[{now_str} | {day_str}] [{tag}] : {msg}", flush=True)
 
 # Find the model file
 def find_gguf_file() -> Path:
@@ -45,7 +54,7 @@ def get_llm() -> Llama:
                 model_path = find_gguf_file()
                 if not model_path.exists():
                     raise FileNotFoundError(f"GGUF model file not found at {model_path}")
-                print(f"[KV Worker] Loading model weights from {model_path}...", flush=True)
+                log_message("system", f"Loading model weights from {model_path}...")
                 _llm = Llama(
                     model_path=str(model_path),
                     n_ctx=40960,
@@ -70,10 +79,10 @@ def start_cloudflare_tunnel() -> Optional[str]:
     try:
         subprocess.run([cmd, "--version"], capture_output=True, check=True)
     except Exception as e:
-        print(f"cloudflared binary not found or not working: {e}. Running without tunnel.", flush=True)
+        log_message("system", f"cloudflared binary not found or not working: {e}. Running without tunnel.")
         return None
 
-    print(f"Starting cloudflared tunnel using: {cmd}", flush=True)
+    log_message("system", f"Starting cloudflared tunnel using: {cmd}")
     try:
         log_file = open("tunnel.log", "w")
         tunnel_process = subprocess.Popen(
@@ -95,7 +104,7 @@ def start_cloudflare_tunnel() -> Optional[str]:
         log_file.close()
         return url
     except Exception as ex:
-        print(f"Failed to start cloudflared tunnel process: {ex}", flush=True)
+        log_message("system", f"Failed to start cloudflared tunnel process: {ex}")
         return None
 
 SUPERKEY = "kv-worker"
@@ -106,44 +115,43 @@ SUPERKEY = "kv-worker"
 def update_github_dns(pat: str, org: str, public_url: str, repo_name: str) -> None:
     max_attempts: int = 5
     dns_key = f"{SUPERKEY}/{repo_name}"
-    print(f"Updating DNS registry via Cloudflare Worker... Key: {dns_key}", flush=True)
+    log_message("system", f"Updating DNS registry via Cloudflare Worker... Key: {dns_key}")
     
     for attempt in range(1, max_attempts + 1):
         try:
             payload = {"key": dns_key, "value": public_url}
             res = requests.post("https://dns-manager.aakashmishra2050880.workers.dev/update", json=payload, timeout=10)
             if res.status_code == 200:
-                print(f"DNS updated successfully for key '{dns_key}' with URL {public_url}", flush=True)
+                log_message("system", f"DNS updated successfully for key '{dns_key}' with URL {public_url}")
                 return
             else:
-                print(f"CF Worker returned status code {res.status_code}: {res.text}", flush=True)
+                log_message("system", f"CF Worker returned status code {res.status_code}: {res.text}")
         except Exception as e:
             import random
-            print(f"Error updating DNS (attempt {attempt}/{max_attempts}): {e}", flush=True)
+            log_message("system", f"Error updating DNS (attempt {attempt}/{max_attempts}): {e}")
             time.sleep(random.uniform(2.0, 5.0))
 
 def trigger_self_workflow(pat: str, org: str, repo_name: str) -> None:
-    print(f"Triggering self workflow dispatch for repository {repo_name}...", flush=True)
+    log_message("system", f"Triggering self workflow dispatch for repository {repo_name}...")
     try:
         auth_obj: Auth.Token = Auth.Token(pat)
         g: Github = Github(auth=auth_obj)
         repo = g.get_repo(f"{org}/{repo_name}")
         default_branch: str = repo.default_branch
         
-        # Trigger standard workflow.yml on the default branch
         wf = repo.get_workflow("workflow.yml")
         wf.create_dispatch(default_branch)
-        print("Self workflow dispatch triggered successfully.", flush=True)
+        log_message("system", "Self workflow dispatch triggered successfully.")
     except Exception as e:
-        print(f"Failed to trigger self workflow: {e}", flush=True)
+        log_message("system", f"Failed to trigger self workflow: {e}")
 
 def shutdown_timer(pat: str, org: str, repo_name: str, duration_hours: float) -> None:
     duration_seconds: float = duration_hours * 3600
-    print(f"Graceful shutdown timer started: Server will run for {duration_hours} hours ({duration_seconds} seconds).", flush=True)
+    log_message("system", f"Graceful shutdown timer started: Server will run for {duration_hours} hours ({duration_seconds} seconds).")
     
     time.sleep(duration_seconds)
     
-    print("Timer expired. Initiating graceful shutdown and restart...", flush=True)
+    log_message("system", "Timer expired. Initiating graceful shutdown and restart...")
     
     # 1. Trigger next workflow run
     if pat and repo_name != "test":
@@ -159,7 +167,7 @@ def shutdown_timer(pat: str, org: str, repo_name: str, duration_hours: float) ->
         except Exception:
             pass
         
-    print("Exiting server process gracefully with code 0.", flush=True)
+    log_message("system", "Exiting server process gracefully with code 0.")
     os._exit(0)
 
 # ---------------------------------------------------------------------------
@@ -192,21 +200,18 @@ async def lifespan(app: FastAPI):
     try:
         get_llm()
     except Exception as e:
-        print(f"[Warmup] Warning: model warmup failed: {e}", flush=True)
+        log_message("system", f"Warning: model warmup failed: {e}")
 
     # Start Cloudflare Quick Tunnel
     MY_TUNNEL_URL = start_cloudflare_tunnel()
     if MY_TUNNEL_URL:
-        print(f"==================================================", flush=True)
-        print(f"KV CACHE COMPILER TUNNEL ESTABLISHED SUCCESSFULLY!", flush=True)
-        print(f"Address: {MY_TUNNEL_URL}", flush=True)
-        print(f"==================================================", flush=True)
+        log_message("system", f"KV CACHE COMPILER TUNNEL ESTABLISHED SUCCESSFULLY! Address: {MY_TUNNEL_URL}")
         
         # Register itself under the kv-worker DNS key
         if pat:
             update_github_dns(pat, org, MY_TUNNEL_URL, repo_name)
     else:
-        print("Running kv worker without public tunnel.", flush=True)
+        log_message("system", "Running kv worker without public tunnel.")
         
     yield
 
@@ -216,15 +221,12 @@ app = FastAPI(title="KV Global Cache Pre-compiler Worker", lifespan=lifespan)
 # Redis Connection Sync
 # ---------------------------------------------------------------------------
 def upload_to_redis(client_id: str, state_data: bytes) -> bool:
-    """
-    Looks up the active redis-worker URL from config.json and pushes the global state payload.
-    """
     org: str = os.getenv("GITHUB_ORG", "LeadbaseAI-Official")
-    print(f"[Redis Link] Fetching live redis-worker endpoint address...", flush=True)
+    log_message("system", "Fetching live redis-worker endpoint address...")
     try:
         res_dns = requests.get(f"https://raw.githubusercontent.com/{org}/dns/main/config.json", timeout=10)
         if res_dns.status_code != 200:
-            print(f"[Redis Link] Failed to fetch DNS registry from GitHub raw (Code: {res_dns.status_code})", flush=True)
+            log_message("system", f"Failed to fetch DNS registry from GitHub raw (Code: {res_dns.status_code})")
             return False
             
         config_data = res_dns.json()
@@ -235,13 +237,11 @@ def upload_to_redis(client_id: str, state_data: bytes) -> bool:
                 redis_url = url
                 break
         
-        import gzip
         compressed_data = gzip.compress(state_data)
-        print(f"[Redis Link] Compressed state from {len(state_data)} to {len(compressed_data)} bytes.", flush=True)
+        log_message("system", f"Compressed state from {len(state_data)} to {len(compressed_data)} bytes.")
 
         if not redis_url:
-            print("[Redis Link] No active redis-worker URL registered. Falling back to direct broadcast to active runners...", flush=True)
-            # Find all active model runners (keys starting with 0bm or 2bm)
+            log_message("system", "No active redis-worker URL registered. Falling back to direct broadcast to active runners...")
             targets = []
             for category, sub_dict in config_data.items():
                 if category in ("standby-server", "redis-worker", "kv-worker", "standby", "redis"):
@@ -262,12 +262,12 @@ def upload_to_redis(client_id: str, state_data: bytes) -> bool:
                 try:
                     res = requests.post(f"{url.rstrip('/')}/v1/global-update", json=payload, timeout=15)
                     if res.status_code == 200:
-                        print(f"[Direct Sync] Successfully synced client cache to runner: {name}", flush=True)
+                        log_message("system", f"Successfully synced client cache directly to runner: {name}")
                         success_count += 1
                     else:
-                        print(f"[Direct Sync] Runner {name} returned status {res.status_code}", flush=True)
+                        log_message("system", f"Runner {name} returned status {res.status_code}")
                 except Exception as ex:
-                    print(f"[Direct Sync] Error syncing directly to runner {name}: {ex}", flush=True)
+                    log_message("system", f"Error syncing directly to runner {name}: {ex}")
             
             return success_count > 0
 
@@ -279,13 +279,13 @@ def upload_to_redis(client_id: str, state_data: bytes) -> bool:
         
         res = requests.post(f"{redis_url.rstrip('/')}/add", json=payload, timeout=30)
         if res.status_code == 200:
-            print(f"[Redis Link] Successfully pushed compiled global prefix for client {client_id} to Redis.", flush=True)
+            log_message("system", f"Successfully pushed compiled global prefix for client {client_id} to Redis.")
             return True
         else:
-            print(f"[Redis Link] Redis endpoint returned status {res.status_code}: {res.text}", flush=True)
+            log_message("system", f"Redis endpoint returned status {res.status_code}: {res.text}")
             return False
     except Exception as e:
-        print(f"[Redis Link] Error linking to redis-worker: {e}", flush=True)
+        log_message("system", f"Error linking to redis-worker: {e}")
         return False
 
 # ---------------------------------------------------------------------------
@@ -311,13 +311,19 @@ def update_global_cache(req: UpdateRequest) -> Dict[str, Any]:
         stitched_text = "\n".join(prompt_parts)
         
         tokens = llm.tokenize(stitched_text.encode("utf-8"))
-        print(f"[KV Worker] Tokenizing prompt for client {req.client_id} (Token count: {len(tokens)})", flush=True)
+        log_message("system", f"Tokenizing prompt for client {req.client_id} (Token count: {len(tokens)})")
         
         llm.reset()
         llm.eval(tokens)
         
         state_obj = llm.save_state()
-        state_bytes = pickle.dumps(state_obj)
+        
+        # Save both state and the token sequence that generated it
+        payload_obj = {
+            "state": state_obj,
+            "tokens": tokens
+        }
+        state_bytes = pickle.dumps(payload_obj)
         
         # Call active upload
         uploaded = upload_to_redis(req.client_id, state_bytes)
@@ -336,5 +342,4 @@ def update_global_cache(req: UpdateRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"Compilation failed: {str(e)}")
 
 if __name__ == "__main__":
-    # Server runs on port 8000 internally (mapped via cloudflared to localhost:8000)
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=False, access_log=False)
