@@ -14,7 +14,7 @@ from typing import Optional, Dict, Any
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from llama_cpp import Llama, GGML_TYPE_Q8_0
+from llama_cpp import Llama, GGML_TYPE_Q8_0 # type: ignore
 from github import Github, Auth
 from contextlib import asynccontextmanager
 
@@ -230,13 +230,9 @@ def upload_to_redis(client_id: str, state_data: bytes) -> bool:
             return False
             
         config_data = res_dns.json()
-        redis_pool = config_data.get("redis-worker", {})
-        redis_url: Optional[str] = None
-        for key_name, url in redis_pool.items():
-            if url and url.startswith("https://"):
-                redis_url = url
-                break
+        redis_url: Optional[str] = config_data.get("redis-worker", {}).get("active")
         
+        import gzip
         compressed_data = gzip.compress(state_data)
         log_message("system", f"Compressed state from {len(state_data)} to {len(compressed_data)} bytes.")
 
