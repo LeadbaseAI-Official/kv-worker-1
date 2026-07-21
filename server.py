@@ -222,68 +222,79 @@ app = FastAPI(title="KV Global Cache Pre-compiler Worker", lifespan=lifespan)
 # ---------------------------------------------------------------------------
 def upload_to_redis(client_id: str, state_data: bytes) -> bool:
     org: str = os.getenv("GITHUB_ORG", "LeadbaseAI-Official")
-    log_message("system", "Fetching live redis-worker endpoint address...")
-    try:
-        res_dns = requests.get(f"https://raw.githubusercontent.com/{org}/dns/main/config.json", timeout=10)
-        if res_dns.status_code != 200:
-            log_message("system", f"Failed to fetch DNS registry from GitHub raw (Code: {res_dns.status_code})")
-            return False
-            
-        config_data = res_dns.json()
-        redis_url: Optional[str] = config_data.get("redis-worker", {}).get("active")
-        
-        import gzip
-        compressed_data = gzip.compress(state_data)
-        log_message("system", f"Compressed state from {len(state_data)} to {len(compressed_data)} bytes.")
+    
+    import gzip
+    compressed_data = gzip.compress(state_data)
+    log_message("system", f"Compressed state from {len(state_data)} to {len(compressed_data)} bytes.")
+    b64_str = base64.b64encode(compressed_data).decode("utf-8")
+    
+    max_attempts = 5
+    for attempt in range(1, max_attempts + 1):
+        log_message("system", f"Fetching live redis-worker endpoint address (Attempt {attempt}/{max_attempts})...")
+        try:
+            # Query registry with a dynamic timestamp parameter to bypass raw GitHub CDN caching
+            timestamp = int(time.time())
+            res_dns = requests.get(f"https://raw.githubusercontent.com/{org}/dns/main/config.json?t={timestamp}", timeout=10)
+            if res_dns.status_code != 200:
+                log_message("system", f"Failed to fetch DNS registry from GitHub raw (Code: {res_dns.status_code})")
+                time.sleep(10)
+                continue
+                
+            config_data = res_dns.json()
+            redis_url: Optional[str] = config_data.get("redis-worker", {}).get("active")
 
-        if not redis_url:
-            log_message("system", "No active redis-worker URL registered. Falling back to direct broadcast to active runners...")
-            targets = []
-            for category, sub_dict in config_data.items():
-                if category in ("standby-server", "redis-worker", "kv-worker", "standby", "redis"):
-                    continue
-                if isinstance(sub_dict, dict):
-                    for runner_name, url in sub_dict.items():
-                        if url and url.startswith("https://"):
-                            targets.append((runner_name, url))
-            
-            b64_str = base64.b64encode(compressed_data).decode("utf-8")
+            if not redis_url:
+                log_message("system", "No active redis-worker URL registered. Falling back to direct broadcast to active runners...")
+                targets = []
+                for category, sub_dict in config_data.items():
+                    if category in ("standby-server", "redis-worker", "kv-worker", "standby", "redis"):
+                        continue
+                    if isinstance(sub_dict, dict):
+                        for runner_name, url in sub_dict.items():
+                            if url and url.startswith("https://"):
+                                targets.append((runner_name, url))
+                
+                payload = {
+                    "client_id": client_id,
+                    "state_bytes_base64": b64_str
+                }
+                
+                success_count = 0
+                for name, url in targets:
+                    try:
+                        res = requests.post(f"{url.rstrip('/')}/v1/global-update", json=payload, timeout=15)
+                        if res.status_code == 200:
+                            log_message("system", f"Successfully synced client cache directly to runner: {name}")
+                            success_count += 1
+                        else:
+                            log_message("system", f"Runner {name} returned status {res.status_code}")
+                    except Exception as ex:
+                        log_message("system", f"Error syncing directly to runner {name}: {ex}")
+                
+                if success_count > 0:
+                    return True
+                time.sleep(10)
+                continue
+
             payload = {
-                "client_id": client_id,
-                "state_bytes_base64": b64_str
+                "key": f"global:{client_id}",
+                "value": b64_str
             }
             
-            success_count = 0
-            for name, url in targets:
-                try:
-                    res = requests.post(f"{url.rstrip('/')}/v1/global-update", json=payload, timeout=15)
-                    if res.status_code == 200:
-                        log_message("system", f"Successfully synced client cache directly to runner: {name}")
-                        success_count += 1
-                    else:
-                        log_message("system", f"Runner {name} returned status {res.status_code}")
-                except Exception as ex:
-                    log_message("system", f"Error syncing directly to runner {name}: {ex}")
+            res = requests.post(f"{redis_url.rstrip('/')}/add", json=payload, timeout=30)
+            if res.status_code == 200:
+                log_message("system", f"Successfully pushed compiled global prefix for client {client_id} to Redis.")
+                return True
+            else:
+                log_message("system", f"Redis endpoint returned status {res.status_code}. Retrying...")
+        except Exception as e:
+            log_message("system", f"Error linking to redis-worker (Attempt {attempt}/{max_attempts}): {e}")
             
-            return success_count > 0
-
-        b64_str = base64.b64encode(compressed_data).decode("utf-8")
-        payload = {
-            "key": f"global:{client_id}",
-            "value": b64_str
-        }
-        
-        res = requests.post(f"{redis_url.rstrip('/')}/add", json=payload, timeout=30)
-        if res.status_code == 200:
-            log_message("system", f"Successfully pushed compiled global prefix for client {client_id} to Redis.")
-            return True
-        else:
-            log_message("system", f"Redis endpoint returned status {res.status_code}: {res.text}")
-            return False
-    except Exception as e:
-        log_message("system", f"Error linking to redis-worker: {e}")
-        return False
-
+        if attempt < max_attempts:
+            time.sleep(10)
+            
+    log_message("system", f"Failed to push compiled prefix to Redis after {max_attempts} attempts.")
+    return False
 # ---------------------------------------------------------------------------
 # API Endpoints
 # ---------------------------------------------------------------------------
