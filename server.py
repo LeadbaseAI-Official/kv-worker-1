@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from llama_cpp import Llama
+from llama_cpp import Llama, GGML_TYPE_Q8_0
 from github import Github, Auth
 from contextlib import asynccontextmanager
 
@@ -48,9 +48,11 @@ def get_llm() -> Llama:
                 print(f"[KV Worker] Loading model weights from {model_path}...", flush=True)
                 _llm = Llama(
                     model_path=str(model_path),
-                    n_ctx=8192,
+                    n_ctx=40960,
                     n_threads=2,
-                    flash_attn=True
+                    flash_attn=True,
+                    type_k=GGML_TYPE_Q8_0,
+                    type_v=GGML_TYPE_Q8_0
                 )
     return _llm
 
