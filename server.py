@@ -26,9 +26,10 @@ class UpdateRequest(BaseModel):
 
 # Standardized logging helper: [HH:MM:SS | DD] [tag] : msg
 def log_message(tag: str, msg: str) -> None:
-    now = datetime.datetime.now()
-    now_str = now.strftime("%H:%M:%S")
-    day_str = now.strftime("%d")
+    from datetime import datetime as dt, timezone, timedelta
+    ist_now = dt.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    now_str = ist_now.strftime("%H:%M:%S")
+    day_str = ist_now.strftime("%d")
     print(f"[{now_str} | {day_str}] [{tag}] : {msg}", flush=True)
 
 # Find the model file
@@ -295,6 +296,16 @@ def upload_to_redis(client_id: str, state_data: bytes) -> bool:
             
     log_message("system", f"Failed to push compiled prefix to Redis after {max_attempts} attempts.")
     return False
+_eval_lock = threading.Lock()
+
+class SummarizeRequest(BaseModel):
+    client_id: str
+    phone_number: str
+    history: list[dict[str, str]]
+    system_prompt: str
+    persona: str
+    kb: str
+
 # ---------------------------------------------------------------------------
 # API Endpoints
 # ---------------------------------------------------------------------------
@@ -321,10 +332,10 @@ def update_global_cache(req: UpdateRequest) -> Dict[str, Any]:
         tokens = llm.tokenize(stitched_text.encode("utf-8"))
         log_message("system", f"Tokenizing prompt for client {req.client_id} (Token count: {len(tokens)})")
         
-        llm.reset()
-        llm.eval(tokens)
-        
-        state_obj = llm.save_state()
+        with _eval_lock:
+            llm.reset()
+            llm.eval(tokens)
+            state_obj = llm.save_state()
         
         # Save both state and the token sequence that generated it
         payload_obj = {
@@ -348,6 +359,88 @@ def update_global_cache(req: UpdateRequest) -> Dict[str, Any]:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Compilation failed: {str(e)}")
+
+@app.post("/summarize")
+def summarize_history(req: SummarizeRequest) -> Dict[str, Any]:
+    try:
+        t0 = time.time()
+        llm = get_llm()
+        
+        history_lines = []
+        for msg in req.history:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            history_lines.append(f"{role.capitalize()}: {content}")
+        history_text = "\n".join(history_lines)
+        
+        summary_prompt = (
+            f"<|im_start|>system\n"
+            f"System Prompt:\n{req.system_prompt.strip()}\n\n"
+            f"Persona:\n{req.persona.strip()}\n\n"
+            f"Knowledge Base:\n{req.kb.strip()}<|im_end|>\n"
+            f"<|im_start|>user\n"
+            f"Summarize the following conversation history in 10 or less bullet points. Highlight the customer's needs and key agreements:\n"
+            f"{history_text}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+        
+        tokens_prompt = llm.tokenize(summary_prompt.encode("utf-8"))
+        
+        with _eval_lock:
+            llm.reset()
+            res = llm.create_completion(
+                prompt=tokens_prompt,
+                max_tokens=256,
+                temperature=0.3
+            )
+            summary_text = res["choices"][0]["text"].strip()
+            
+            if "<think>" in summary_text:
+                summary_text = re.sub(r"<think>.*?</think>", "", summary_text, flags=re.DOTALL).strip()
+            
+            log_message("system", f"Generated conversation summary for {req.phone_number}: {summary_text[:100]}...")
+            
+            prompt_parts = [
+                "System Prompt:",
+                req.system_prompt.strip(),
+                "",
+                "Persona:",
+                req.persona.strip(),
+                "",
+                "Knowledge Base (Authoritative Facts):",
+                req.kb.strip(),
+                "",
+                "Summary of previous conversation:",
+                summary_text,
+                ""
+            ]
+            system_content = "\n".join(prompt_parts)
+            stitched_text = f"<|im_start|>system\n{system_content}<|im_end|>\n"
+            
+            tokens = llm.tokenize(stitched_text.encode("utf-8"))
+            llm.reset()
+            llm.eval(tokens)
+            state_obj = llm.save_state()
+            
+        payload_obj = {
+            "state": state_obj,
+            "tokens": tokens
+        }
+        state_bytes = pickle.dumps(payload_obj)
+        state_bytes_base64 = base64.b64encode(state_bytes).decode("utf-8")
+        
+        duration = time.time() - t0
+        return {
+            "status": "success",
+            "summary": summary_text,
+            "state_bytes_base64": state_bytes_base64,
+            "tokens_compiled": len(tokens),
+            "compilation_time_seconds": round(duration, 3)
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Summarization and compilation failed: {str(e)}")
 
 if __name__ == "__main__":
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=False, access_log=False)
