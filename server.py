@@ -233,15 +233,38 @@ def upload_to_redis(client_id: str, state_data: bytes) -> bool:
     for attempt in range(1, max_attempts + 1):
         log_message("system", f"Fetching live redis-worker endpoint address (Attempt {attempt}/{max_attempts})...")
         try:
-            # Query registry with a dynamic timestamp parameter to bypass raw GitHub CDN caching
-            timestamp = int(time.time())
-            res_dns = requests.get(f"https://raw.githubusercontent.com/{org}/dns/main/config.json?t={timestamp}", timeout=10)
-            if res_dns.status_code != 200:
-                log_message("system", f"Failed to fetch DNS registry from GitHub raw (Code: {res_dns.status_code})")
-                time.sleep(10)
+            # Query registry using GitHub REST API for instant 0s CDN cache resolution
+            headers = {
+                "User-Agent": "LeadBaseAI-Worker",
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache"
+            }
+            if pat:
+                headers["Authorization"] = f"token {pat}"
+                
+            config_data = None
+            try:
+                api_url = f"https://api.github.com/repos/{org}/dns/contents/config.json"
+                res_api = requests.get(api_url, headers=headers, timeout=5)
+                if res_api.status_code == 200:
+                    api_json = res_api.json()
+                    if "content" in api_json:
+                        decoded = base64.b64decode(api_json["content"]).decode("utf-8")
+                        config_data = json.loads(decoded)
+            except Exception:
+                pass
+                
+            if not config_data:
+                timestamp = int(time.time())
+                res_dns = requests.get(f"https://raw.githubusercontent.com/{org}/dns/main/config.json?t={timestamp}", headers=headers, timeout=10)
+                if res_dns.status_code == 200:
+                    config_data = res_dns.json()
+
+            if not config_data:
+                log_message("system", "Failed to fetch DNS registry from GitHub. Retrying...")
+                time.sleep(5)
                 continue
                 
-            config_data = res_dns.json()
             redis_url: Optional[str] = config_data.get("redis-worker", {}).get("active")
 
             if not redis_url:
