@@ -223,6 +223,7 @@ app = FastAPI(title="KV Global Cache Pre-compiler Worker", lifespan=lifespan)
 # ---------------------------------------------------------------------------
 def upload_to_redis(client_id: str, state_data: bytes) -> bool:
     org: str = os.getenv("GITHUB_ORG", "LeadbaseAI-Official")
+    pat: str = os.getenv("GITHUB_PAT", "")
     
     import gzip
     compressed_data = gzip.compress(state_data)
