@@ -360,8 +360,10 @@ def update_global_cache(req: UpdateRequest) -> Dict[str, Any]:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Compilation failed: {str(e)}")
 
-@app.post("/summarize")
-def summarize_history(req: SummarizeRequest) -> Dict[str, Any]:
+_summary_jobs: Dict[str, Dict[str, Any]] = {}
+_summary_jobs_lock = threading.Lock()
+
+def _process_summary_job(job_id: str, req: SummarizeRequest) -> None:
     try:
         t0 = time.time()
         llm = get_llm()
@@ -375,11 +377,9 @@ def summarize_history(req: SummarizeRequest) -> Dict[str, Any]:
         
         summary_prompt = (
             f"<|im_start|>system\n"
-            f"System Prompt:\n{req.system_prompt.strip()}\n\n"
-            f"Persona:\n{req.persona.strip()}\n\n"
-            f"Knowledge Base:\n{req.kb.strip()}<|im_end|>\n"
+            f"You are a helpful assistant that summarizes customer service chat transcripts concisely.<|im_end|>\n"
             f"<|im_start|>user\n"
-            f"Summarize the following conversation history in 10 or less bullet points. Highlight the customer's needs and key agreements:\n"
+            f"Summarize the following chat transcript in 5 concise bullet points. Highlight the customer's questions, interests, and needs:\n"
             f"{history_text}<|im_end|>\n"
             f"<|im_start|>assistant\n"
         )
@@ -390,7 +390,7 @@ def summarize_history(req: SummarizeRequest) -> Dict[str, Any]:
             llm.reset()
             res = llm.create_completion(
                 prompt=tokens_prompt,
-                max_tokens=256,
+                max_tokens=150,
                 temperature=0.3
             )
             summary_text = res["choices"][0]["text"].strip()
@@ -398,7 +398,7 @@ def summarize_history(req: SummarizeRequest) -> Dict[str, Any]:
             if "<think>" in summary_text:
                 summary_text = re.sub(r"<think>.*?</think>", "", summary_text, flags=re.DOTALL).strip()
             
-            log_message("system", f"Generated conversation summary for {req.phone_number}: {summary_text[:100]}...")
+            log_message("system", f"[Job {job_id[:8]}] Generated conversation summary for {req.phone_number}: {summary_text[:100]}...")
             
             prompt_parts = [
                 "System Prompt:",
@@ -430,17 +430,48 @@ def summarize_history(req: SummarizeRequest) -> Dict[str, Any]:
         state_bytes_base64 = base64.b64encode(state_bytes).decode("utf-8")
         
         duration = time.time() - t0
-        return {
-            "status": "success",
-            "summary": summary_text,
-            "state_bytes_base64": state_bytes_base64,
-            "tokens_compiled": len(tokens),
-            "compilation_time_seconds": round(duration, 3)
-        }
+        with _summary_jobs_lock:
+            _summary_jobs[job_id] = {
+                "status": "completed",
+                "summary": summary_text,
+                "state_bytes_base64": state_bytes_base64,
+                "tokens_compiled": len(tokens),
+                "compilation_time_seconds": round(duration, 3)
+            }
+        log_message("system", f"[Job {job_id[:8]}] Summarization job completed in {round(duration, 2)}s for {req.phone_number}")
     except Exception as e:
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Summarization and compilation failed: {str(e)}")
+        with _summary_jobs_lock:
+            _summary_jobs[job_id] = {
+                "status": "failed",
+                "error": str(e)
+            }
+        log_message("system", f"[Job {job_id[:8]}] Summarization job failed: {e}")
+
+@app.post("/summarize")
+def summarize_history(req: SummarizeRequest) -> Dict[str, Any]:
+    import uuid
+    job_id = str(uuid.uuid4())
+    with _summary_jobs_lock:
+        _summary_jobs[job_id] = {"status": "pending"}
+    
+    t = threading.Thread(target=_process_summary_job, args=(job_id, req), daemon=True)
+    t.start()
+    
+    log_message("system", f"Dispatched background summary job {job_id[:8]} for phone {req.phone_number}")
+    return {
+        "status": "pending",
+        "job_id": job_id
+    }
+
+@app.get("/summarize/status")
+def get_summary_status(job_id: str) -> Dict[str, Any]:
+    with _summary_jobs_lock:
+        job = _summary_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job ID not found")
+    return job
 
 if __name__ == "__main__":
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=False, access_log=False)
