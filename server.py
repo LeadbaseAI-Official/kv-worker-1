@@ -27,6 +27,8 @@ class UpdateRequest(BaseModel):
     kb: str
 
 
+
+
 def log_message(tag: str, msg: str) -> None:
     from datetime import datetime as dt, timezone, timedelta
     ist_now = dt.now(timezone.utc) + timedelta(hours=5, minutes=30)
@@ -349,6 +351,8 @@ def sync_kv_to_target_runner(model_id: str, client_id: str, state_bytes: bytes) 
 
 
 
+
+
 class CustomerSummaryCompileRequest(BaseModel):
     model_id: str = "0bm-1"
     customer_key: str
@@ -523,6 +527,8 @@ def update_global_cache(req: UpdateRequest) -> Dict[str, Any]:
         log_message("COMPILER", f"Compiled binary KV state size: {len(state_bytes)} bytes (~{len(state_bytes) / (1024*1024):.2f} MB)")
         
         sync_result: Dict[str, Any] = sync_kv_to_target_runner(target_model, req.client_id, state_bytes)
+
+
         
         duration = time.time() - t0
         log_message("UPDATE_COMPLETE", f"Total compilation & dispatch time: {round(duration, 3)} seconds")
