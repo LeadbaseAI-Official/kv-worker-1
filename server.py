@@ -59,12 +59,13 @@ def get_llm() -> Llama:
                 log_message("system", f"Loading model weights from {model_path}...")
                 _llm = Llama(
                     model_path=str(model_path),
-                    n_ctx=40960,
+                    n_ctx=4096,
                     n_threads=2,
                     flash_attn=True,
                     type_k=GGML_TYPE_Q8_0,
                     type_v=GGML_TYPE_Q8_0
                 )
+
     return _llm
 
 tunnel_process: Optional[subprocess.Popen] = None
@@ -410,11 +411,12 @@ def compile_summary_kv(req: CustomerSummaryCompileRequest) -> Dict[str, Any]:
         log_message("debug", f"[summary-compile] : Tokenized system + summary prompt (Token count: {len(tokens)})")
         
         # DYNAMIC CONTEXT EVALUATION ONLY (No generation inference!)
+        dynamic_n_ctx: int = max(256, len(tokens) + 16)
         model_path = find_gguf_file()
         with _eval_lock:
             comp_llm = Llama(
                 model_path=str(model_path),
-                n_ctx=len(tokens) + 64,
+                n_ctx=dynamic_n_ctx,
                 n_threads=2,
                 flash_attn=True,
                 type_k=GGML_TYPE_Q8_0,
@@ -424,6 +426,7 @@ def compile_summary_kv(req: CustomerSummaryCompileRequest) -> Dict[str, Any]:
             comp_llm.eval(tokens)
             state_obj = comp_llm.save_state()
             del comp_llm  # Free temporary compiler instance
+
         
         customer_obj = {
             "customer_key": req.customer_key,
@@ -494,13 +497,14 @@ def update_global_cache(req: UpdateRequest) -> Dict[str, Any]:
         log_message("TOKENIZER", f"Tokenizer generated {len(tokens)} tokens for client_id='{req.client_id}'")
         
         # DYNAMIC CONTEXT COMPRESSION:
-        # Create a dynamically-sized Llama instance (n_ctx = len(tokens) + 64)
-        # Exports a compact ~34.5 MB state file instead of 564 MB!
+        # Create a dynamically-sized Llama instance (n_ctx = max(256, len(tokens) + 16))
+        # Exports a compact ~20-35 MB state file instead of 564 MB!
+        dynamic_n_ctx: int = max(256, len(tokens) + 16)
         model_path = find_gguf_file()
         with _eval_lock:
             comp_llm = Llama(
                 model_path=str(model_path),
-                n_ctx=len(tokens) + 64,
+                n_ctx=dynamic_n_ctx,
                 n_threads=2,
                 flash_attn=True,
                 type_k=GGML_TYPE_Q8_0,
@@ -509,6 +513,7 @@ def update_global_cache(req: UpdateRequest) -> Dict[str, Any]:
             comp_llm.eval(tokens)
             state_obj = comp_llm.save_state()
             del comp_llm  # Free temporary compiler instance
+
         
         payload_obj = {
             "state": state_obj,
