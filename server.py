@@ -253,7 +253,7 @@ def send_state_to_model_runner(model_id: str, client_id: str, b64_str: str) -> b
     """
     runner_url: Optional[str] = resolve_runner_url_from_dns(model_id)
     if not runner_url:
-        log_message("sync", f"Target runner '{model_id}' URL not found in DNS registry (runner may be booting).")
+        log_message("SYNC", f"❌ Target runner '{model_id}' URL not found in DNS registry (runner may be booting).")
         return False
         
     endpoint: str = f"{runner_url.rstrip('/')}/v1/global-update"
@@ -263,16 +263,16 @@ def send_state_to_model_runner(model_id: str, client_id: str, b64_str: str) -> b
     }
     
     try:
-        log_message("sync", f"Posting compiled KV state to model runner '{model_id}' at {endpoint}...")
+        log_message("SYNC", f"🚀 Dispatching compiled KV state to target model runner '{model_id}' at {endpoint}...")
         res = requests.post(endpoint, json=payload, timeout=20)
         if res.status_code == 200:
-            log_message("sync", f"Successfully synced KV state to model runner '{model_id}'!")
+            log_message("SYNC", f"✅ SUCCESS: KV state delivered to model runner '{model_id}'!")
             return True
         else:
-            log_message("sync", f"Model runner '{model_id}' returned HTTP {res.status_code}: {res.text}")
+            log_message("SYNC", f"⚠️ Model runner '{model_id}' returned HTTP {res.status_code}: {res.text}")
             return False
     except Exception as err:
-        log_message("sync", f"Connection to model runner '{model_id}' failed: {err}")
+        log_message("SYNC", f"❌ Connection error sending state to model runner '{model_id}': {err}")
         return False
 
 def enqueue_for_retry(model_id: str, client_id: str, b64_str: str) -> None:
@@ -288,7 +288,7 @@ def enqueue_for_retry(model_id: str, client_id: str, b64_str: str) -> None:
             "next_retry_timestamp": time.time() + 120
         }
         _pending_retries.append(item)
-        log_message("retry", f"Enqueued compiled state for client='{client_id}', model='{model_id}' in 2-min memory retry queue.")
+        log_message("RETRY_QUEUE", f"📦 Enqueued compiled state for client='{client_id}', model='{model_id}' in 2-min memory retry queue.")
 
 def _kv_retry_worker() -> None:
     """
@@ -315,16 +315,16 @@ def _kv_retry_worker() -> None:
             b64: str = item["b64_str"]
             attempts: int = item["attempts"] + 1
             
-            log_message("retry", f"[Retry Attempt #{attempts}] Re-evaluating fresh DNS for runner '{m_id}' (client='{c_id}')...")
+            log_message("RETRY_WORKER", f"[Retry Attempt #{attempts}] Re-evaluating fresh DNS for runner '{m_id}' (client='{c_id}')...")
             success: bool = send_state_to_model_runner(m_id, c_id, b64)
             if success:
-                log_message("retry", f"Retry attempt #{attempts} succeeded for client='{c_id}' -> runner '{m_id}'!")
+                log_message("RETRY_WORKER", f"✅ Retry attempt #{attempts} succeeded for client='{c_id}' -> runner '{m_id}'!")
             else:
                 item["attempts"] = attempts
                 item["next_retry_timestamp"] = time.time() + 120
                 with _retry_queue_lock:
                     _pending_retries.append(item)
-                log_message("retry", f"Retry attempt #{attempts} failed for runner '{m_id}'. Will retry again in 2 minutes.")
+                log_message("RETRY_WORKER", f"❌ Retry attempt #{attempts} failed for runner '{m_id}'. Will retry again in 2 minutes.")
 
 # Start background retry worker thread on module load
 threading.Thread(target=_kv_retry_worker, daemon=True).start()
@@ -334,15 +334,18 @@ def sync_kv_to_target_runner(model_id: str, client_id: str, state_bytes: bytes) 
     Compresses state bytes and pushes to target model runner. Enqueues in memory if runner is offline/booting.
     """
     compressed_data: bytes = gzip.compress(state_bytes)
-    log_message("sync", f"Compressed state for model '{model_id}', client '{client_id}': {len(state_bytes)} -> {len(compressed_data)} bytes.")
+    log_message("COMPRESSION", f"State compressed from {len(state_bytes)} to {len(compressed_data)} bytes (~{len(compressed_data)/(1024*1024):.2f} MB).")
     b64_str: str = base64.b64encode(compressed_data).decode("utf-8")
     
     delivered: bool = send_state_to_model_runner(model_id, client_id, b64_str)
     if delivered:
+        log_message("RESULT", f"State delivery COMPLETE for client='{client_id}' -> model='{model_id}'")
         return {"status": "delivered", "model_id": model_id, "client_id": client_id}
     else:
         enqueue_for_retry(model_id, client_id, b64_str)
+        log_message("RESULT", f"Target runner '{model_id}' offline/booting -> Enqueued for 2-minute memory retries.")
         return {"status": "enqueued_for_retry", "model_id": model_id, "client_id": client_id}
+
 
 
 class CustomerSummaryCompileRequest(BaseModel):
@@ -462,7 +465,14 @@ def compile_summary_kv(req: CustomerSummaryCompileRequest) -> Dict[str, Any]:
 def update_global_cache(req: UpdateRequest) -> Dict[str, Any]:
     try:
         t0 = time.time()
-        log_message("debug", f"[compile] : Received compilation request for client_id={req.client_id}")
+        target_model: str = req.model_id or "0bm-1"
+        
+        print("\n" + "═" * 65, flush=True)
+        log_message("UPDATE_REQUEST", f"📥 RECEIVED COMPILATION REQUEST: client_id='{req.client_id}', target_model='{target_model}'")
+        log_message("UPDATE_REQUEST", f"   System Prompt : {len(req.system_prompt)} chars")
+        log_message("UPDATE_REQUEST", f"   Persona       : {len(req.persona)} chars")
+        log_message("UPDATE_REQUEST", f"   KnowledgeBase : {len(req.kb)} chars")
+        print("═" * 65, flush=True)
         
         prompt_parts = [
             "System Prompt:",
@@ -481,7 +491,7 @@ def update_global_cache(req: UpdateRequest) -> Dict[str, Any]:
         # Tokenize using baseline model
         base_llm = get_llm()
         tokens = base_llm.tokenize(stitched_text.encode("utf-8"))
-        log_message("debug", f"[compile] : Tokenized prompt for client_id={req.client_id} (Token count: {len(tokens)})")
+        log_message("TOKENIZER", f"Tokenizer generated {len(tokens)} tokens for client_id='{req.client_id}'")
         
         # DYNAMIC CONTEXT COMPRESSION:
         # Create a dynamically-sized Llama instance (n_ctx = len(tokens) + 64)
@@ -505,12 +515,14 @@ def update_global_cache(req: UpdateRequest) -> Dict[str, Any]:
             "tokens": tokens
         }
         state_bytes = pickle.dumps(payload_obj)
-        log_message("debug", f"[compile] : Compact state size: {len(state_bytes)} bytes (~{len(state_bytes) / (1024*1024):.1f} MB)")
+        log_message("COMPILER", f"Compiled binary KV state size: {len(state_bytes)} bytes (~{len(state_bytes) / (1024*1024):.2f} MB)")
         
-        target_model: str = req.model_id or "0bm-1"
         sync_result: Dict[str, Any] = sync_kv_to_target_runner(target_model, req.client_id, state_bytes)
         
         duration = time.time() - t0
+        log_message("UPDATE_COMPLETE", f"Total compilation & dispatch time: {round(duration, 3)} seconds")
+        print("═" * 65 + "\n", flush=True)
+        
         return {
             "status": sync_result.get("status", "success"),
             "client_id": req.client_id,
@@ -523,6 +535,7 @@ def update_global_cache(req: UpdateRequest) -> Dict[str, Any]:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Compilation failed: {str(e)}")
+
 
 if __name__ == "__main__":
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=False, access_log=False)
